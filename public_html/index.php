@@ -13,10 +13,10 @@ class BlizzardTalentTest
     private $talentNameCache = [];
     private $gearIconCache = [];
     private $tierBonusCache = [];
-    private $cachePath = '/tmp/talent_icons.json';
-    private $talentCachePath = '/tmp/talent_names.json';
-    private $gearIconCachePath = '/tmp/gear_icons.json';
-    private $tierBonusCachePath = '/tmp/tier_bonuses.json';
+    private $cachePath = __DIR__ . '/tmp/talent_icons.json';
+    private $talentCachePath = __DIR__ . '/tmp/talent_names.json';
+    private $gearIconCachePath = __DIR__ . '/tmp/gear_icons.json';
+    private $tierBonusCachePath = __DIR__ . '/tmp/tier_bonuses.json';
 
     public function __construct()
     {
@@ -52,11 +52,35 @@ class BlizzardTalentTest
             ] as $prop => $path
         ) {
             if (!empty($this->$prop)) {
-                @file_put_contents($path, json_encode($this->$prop, JSON_PRETTY_PRINT));
+                $result = file_put_contents($path, json_encode($this->$prop, JSON_PRETTY_PRINT));
+                if ($result === false) {
+                    error_log("Cache write failed: {$path}");
+                }
             }
         }
     }
-
+    private function saveCaches()
+    {
+        foreach (
+            [
+                'iconCache' => $this->cachePath,
+                'talentNameCache' => $this->talentCachePath,
+                'gearIconCache' => $this->gearIconCachePath,
+                'tierBonusCache' => $this->tierBonusCachePath
+            ] as $prop => $path
+        ) {
+            if (!empty($this->$prop)) {
+                $dir = dirname($path);
+                if (!is_dir($dir)) {
+                    mkdir($dir, 0777, true);
+                }
+                $result = file_put_contents($path, json_encode($this->$prop, JSON_PRETTY_PRINT));
+                if ($result === false) {
+                    die("FAILED TO WRITE CACHE: {$path} - Check permissions");
+                }
+            }
+        }
+    }
     private function apiRequest($url, $params = [])
     {
         $ch = curl_init();
@@ -111,9 +135,9 @@ class BlizzardTalentTest
                 return $name;
             }
         } catch (Exception $e) {
-            // don't cache failures
+            // don't cache, don't log spam
         }
-        return 'Unknown Talent';
+        return null; // Return null, not 'Unknown Talent'
     }
 
     private function getSpellIcon($spellUrl, $spellId)
@@ -179,104 +203,144 @@ class BlizzardTalentTest
         }
     }
 
-private function processTalents($talents)
-{
-    if (empty($talents)) return [];
+    private function processTalents($talents)
+    {
+        if (empty($talents)) return [];
 
-    $result = [];
-    foreach ($talents as $talent) {
-        $talentId = $talent['id']?? null;
-        $rank = $talent['rank']?? 0;
+        $result = [];
+        foreach ($talents as $talent) {
+            $talentId = $talent['id'] ?? null;
+            $rank = $talent['rank'] ?? 0;
 
-        // Case 1: Full tooltip exists - use it
-        $name = $talent['tooltip']['talent']['name']
-           ?? $talent['tooltip']['spell_tooltip']['spell']['name']
-           ?? null;
+            // Priority 1: Name from spell_tooltip - this exists for 90% of talents
+            $name = $talent['tooltip']['spell_tooltip']['spell']['name'] ?? null;
 
-        $spellId = $talent['tooltip']['spell_tooltip']['spell']['id']?? null;
-        $spellUrl = $talent['tooltip']['spell_tooltip']['spell']['key']['href']?? null;
+            // Priority 2: Name from talent tooltip
+            if (!$name) {
+                $name = $talent['tooltip']['talent']['name'] ?? null;
+            }
 
-        // Case 2: No tooltip at all - try API lookup once, then give up
-        if (!$name && $talentId) {
-            $name = $this->getTalentName($talentId); // this returns 'Unknown Talent' if 404
+            $spellId = $talent['tooltip']['spell_tooltip']['spell']['id'] ?? null;
+            $spellUrl = $talent['tooltip']['spell_tooltip']['spell']['key']['href'] ?? null;
+
+            // Priority 3: Only hit the static API if we still have nothing
+            if (!$name && $talentId) {
+                $name = $this->getTalentName($talentId); // returns null if 404
+            }
+
+            // Final fallback
+            if (!$name) {
+                $name = $talentId ? "Talent #{$talentId}" : 'Unknown';
+            }
+
+            $iconUrl = null;
+            if ($spellUrl && $spellId) {
+                $iconUrl = $this->getSpellIcon($spellUrl, $spellId);
+            }
+
+            $result[] = [
+                'name' => $name,
+                'rank' => $rank,
+                'icon' => $iconUrl,
+                'spell_id' => $spellId,
+                'talent_id' => $talentId
+            ];
+        }
+        return $result;
+    }
+
+    public function getCharacterTalents($realmSlug, $characterName)
+    {
+        $realmSlug = strtolower(str_replace(' ', '-', $realmSlug));
+        $characterName = strtolower($characterName);
+        $baseUrl = "https://{$this->region}.api.blizzard.com/profile/wow/character/{$realmSlug}/{$characterName}";
+
+        $charData = $this->apiRequest($baseUrl, ['namespace' => "profile-{$this->region}", 'locale' => 'en_US']);
+
+        // This is the key change: we need the full tree data
+        $specData = $this->apiRequest("{$baseUrl}/specializations", [
+            'namespace' => "profile-{$this->region}",
+            'locale' => 'en_US' // <-- This forces tooltip data
+        ]);
+
+        if (empty($specData['specializations'])) {
+            throw new Exception("No specialization data found");
         }
 
-        // Final fallback: show the ID so you know what broke
-        if ($name === 'Unknown Talent' ||!$name) {
-            $name = "Talent #{$talentId}";
+        $spec = $specData['specializations'][0];
+        if (empty($spec['loadouts'])) {
+            throw new Exception("No loadouts found");
         }
 
-        $iconUrl = null;
-        if ($spellUrl && $spellId) {
-            $iconUrl = $this->getSpellIcon($spellUrl, $spellId);
+        $loadout = null;
+        foreach ($spec['loadouts'] as $l) {
+            if (!empty($l['is_active'])) {
+                $loadout = $l;
+                break;
+            }
+        }
+        if (!$loadout) $loadout = $spec['loadouts'][0];
+
+        $heroTree = $spec['selected_hero_talent_tree']['name'] ??
+            $loadout['selected_hero_talent_tree']['name'] ??
+            'None';
+
+        $classTalents = $this->processTalents($loadout['selected_class_talents'] ?? []);
+        $specTalents = $this->processTalents($loadout['selected_spec_talents'] ?? []);
+        $heroTalents = $this->processTalents($loadout['selected_hero_talents'] ?? []);
+
+        // Merge duplicates inside each list + remove cross-list doubles
+        function cleanTalents($talents, &$seenKeys)
+        {
+            $out = [];
+            foreach ($talents as $t) {
+                if (empty($t['name']) || $t['name'] === 'Unknown' || strpos($t['name'], 'Talent #') === 0) continue;
+
+                $key = $t['spell_id'] ?? ($t['talent_id'] ? 't' . $t['talent_id'] : $t['name']);
+
+                if (isset($seenKeys[$key])) {
+                    // Already seen - add ranks together if it's a dupe in same list
+                    foreach ($out as &$existing) {
+                        $existingKey = $existing['spell_id'] ?? 't' . $existing['talent_id'] ?? $existing['name'];
+                        if ($existingKey === $key) {
+                            $existing['rank'] += $t['rank'];
+                            break;
+                        }
+                    }
+                } else {
+                    $seenKeys[$key] = true;
+                    $out[] = $t;
+                }
+            }
+            return $out;
         }
 
-        $result[] = [
-            'name' => $name,
-            'rank' => $rank,
-            'icon' => $iconUrl,
-            'spell_id' => $spellId,
-            'talent_id' => $talentId
+        $seen = [];
+        $classTalents = cleanTalents($classTalents, $seen);
+        $specTalents = cleanTalents($specTalents, $seen);
+        $heroTalents = cleanTalents($heroTalents, $seen);
+
+        $this->saveCaches();
+
+        return [
+            'character' => [
+                'name' => $charData['name'],
+                'realm' => $charData['realm']['name'],
+                'level' => $charData['level'],
+                'race' => $charData['race']['name'],
+                'class' => $charData['character_class']['name'],
+                'spec' => $charData['active_spec']['name'],
+                'hero_tree' => $heroTree,
+                'faction' => $charData['faction']['type']
+            ],
+            'talents' => [
+                'class' => $classTalents,
+                'spec' => $specTalents,
+                'hero' => $heroTalents
+            ],
+            'loadout_code' => $loadout['talent_loadout_code'] ?? null
         ];
     }
-    return $result;
-}
-
-public function getCharacterTalents($realmSlug, $characterName)
-{
-    $realmSlug = strtolower(str_replace(' ', '-', $realmSlug));
-    $characterName = strtolower($characterName);
-    $baseUrl = "https://{$this->region}.api.blizzard.com/profile/wow/character/{$realmSlug}/{$characterName}";
-
-    $charData = $this->apiRequest($baseUrl, ['namespace' => "profile-{$this->region}", 'locale' => 'en_US']);
-
-    // This is the key change: we need the full tree data
-    $specData = $this->apiRequest("{$baseUrl}/specializations", [
-        'namespace' => "profile-{$this->region}",
-        'locale' => 'en_US' // <-- This forces tooltip data
-    ]);
-
-    if (empty($specData['specializations'])) {
-        throw new Exception("No specialization data found");
-    }
-
-    $spec = $specData['specializations'][0];
-    if (empty($spec['loadouts'])) {
-        throw new Exception("No loadouts found");
-    }
-
-    $loadout = null;
-    foreach ($spec['loadouts'] as $l) {
-        if (!empty($l['is_active'])) {
-            $loadout = $l;
-            break;
-        }
-    }
-    if (!$loadout) $loadout = $spec['loadouts'][0];
-
-    $heroTree = $spec['selected_hero_talent_tree']['name']??
-        $loadout['selected_hero_talent_tree']['name']??
-        'None';
-
-    return [
-        'character' => [
-            'name' => $charData['name'],
-            'realm' => $charData['realm']['name'],
-            'level' => $charData['level'],
-            'race' => $charData['race']['name'],
-            'class' => $charData['character_class']['name'],
-            'spec' => $charData['active_spec']['name'],
-            'hero_tree' => $heroTree,
-            'faction' => $charData['faction']['type']
-        ],
-        'talents' => [
-            'class' => $this->processTalents($loadout['selected_class_talents']?? []),
-            'spec' => $this->processTalents($loadout['selected_spec_talents']?? []),
-            'hero' => $this->processTalents($loadout['selected_hero_talents']?? [])
-        ],
-        'loadout_code' => $loadout['talent_loadout_code']?? null
-    ];
-}
 
     public function getCharacterEquipment($realmSlug, $characterName)
     {
@@ -435,40 +499,93 @@ public function getCharacterTalents($realmSlug, $characterName)
     public function generateSimcString($charData, $gearData, $talentData)
     {
         $c = $charData['character'];
-        $race = strtolower(str_replace(' ', '_', $c['race']));
-        $class = strtolower($c['class']);
-        $spec = strtolower(str_replace(' ', '', $c['spec']));
-        $faction = strtolower($c['faction']);
 
-        $simc = "# {$c['name']} - {$c['realm']}\n";
-        $simc .= "# Level {$c['level']} {$c['race']} {$c['class']}\n\n";
-        $simc .= "{$race}={$c['name']}\n";
-        $simc .= "level={$c['level']}\n";
-        $simc .= "race={$race}\n";
-        $simc .= "class={$class}\n";
+        $specMap = [
+            'Beast Mastery' => 'beast_mastery',
+            'Marksmanship' => 'marksmanship',
+            'Survival' => 'survival',
+            'Arcane' => 'arcane',
+            'Fire' => 'fire',
+            'Frost' => 'frost',
+            'Discipline' => 'discipline',
+            'Holy' => 'holy',
+            'Shadow' => 'shadow',
+            'Assassination' => 'assassination',
+            'Outlaw' => 'outlaw',
+            'Subtlety' => 'subtlety',
+            'Elemental' => 'elemental',
+            'Enhancement' => 'enhancement',
+            'Restoration' => 'restoration',
+            'Blood' => 'blood',
+            'Unholy' => 'unholy',
+            'Arms' => 'arms',
+            'Fury' => 'fury',
+            'Protection' => 'protection',
+            'Balance' => 'balance',
+            'Feral' => 'feral',
+            'Guardian' => 'guardian',
+            'Brewmaster' => 'brewmaster',
+            'Mistweaver' => 'mistweaver',
+            'Windwalker' => 'windwalker',
+            'Devastation' => 'devastation',
+            'Preservation' => 'preservation',
+            'Augmentation' => 'augmentation',
+            'Havoc' => 'havoc',
+            'Vengeance' => 'vengeance',
+            'Affliction' => 'affliction',
+            'Demonology' => 'demonology',
+            'Destruction' => 'destruction',
+            'Retribution' => 'retribution'
+        ];
+
+        $race = strtolower(str_replace(' ', '_', $c['race']));
+        $spec = $specMap[$c['spec']] ?? strtolower(str_replace(' ', '_', $c['spec']));
+        $class = strtolower(str_replace(' ', '_', $c['class']));
+
+        $simc = "{$class}=" . preg_replace('/[^A-Za-z0-9]/', '', $c['name']) . "\n";
         $simc .= "spec={$spec}\n";
-        $simc .= "role=attack\n";
-        $simc .= "position=back\n\n";
+        $simc .= "race={$race}\n\n";
+
+        $slotMap = [
+            'HEAD' => 'head',
+            'NECK' => 'neck',
+            'SHOULDER' => 'shoulder',
+            'BACK' => 'back',
+            'CHEST' => 'chest',
+            'WRIST' => 'wrist',
+            'HANDS' => 'hands',
+            'WAIST' => 'waist',
+            'LEGS' => 'legs',
+            'FEET' => 'feet',
+            'FINGER_1' => 'finger1',
+            'FINGER_2' => 'finger2',
+            'TRINKET_1' => 'trinket1',
+            'TRINKET_2' => 'trinket2',
+            'MAIN_HAND' => 'main_hand',
+            'OFF_HAND' => 'off_hand'
+        ];
 
         foreach ($gearData['items'] as $item) {
-            $slot = strtolower($item['slot_type']);
-            $simc .= "{$slot}=,id={$item['id']},ilevel={$item['ilvl']}";
-            if (!empty($item['enchant'])) {
-                // SimC wants enchant IDs, not names - skip for now
+            if (empty($item['id']) || $item['id'] == 0) continue;
+            if (empty($item['ilvl']) || $item['ilvl'] == 0) continue;
+
+            $slot = $slotMap[$item['slot_type']] ?? strtolower($item['slot_type']);
+            if (in_array($slot, ['shirt', 'tabard'])) continue;
+
+            $parts = ["id={$item['id']}", "ilevel={$item['ilvl']}"];
+
+            if (!empty($item['bonus_list']) && is_array($item['bonus_list'])) {
+                $bonusIds = array_filter($item['bonus_list'], fn($b) => $b > 0);
+                if (!empty($bonusIds)) {
+                    $parts[] = "bonus_id=" . implode('/', $bonusIds);
+                }
             }
-            if (!empty($item['sockets'])) {
-                $gems = array_filter($item['sockets']);
-                if ($gems) $simc .= ",gem_id=" . implode('/', array_fill(0, count($gems), '0'));
-            }
-            if (!empty($item['bonus_list'])) {
-                $simc .= ",bonus_id=" . implode('/', $item['bonus_list']);
-            }
-            $simc .= "\n";
+
+            $simc .= "{$slot}=," . implode(',', $parts) . "\n";
         }
 
-        $simc .= "\n# Talents\n";
-        if ($talentData['loadout_code']) {
-            $simc .= "talents={$talentData['loadout_code']}\n";
+        if (!empty($talentData['loadout_code'])) {
+            $simc .= "\ntalents=" . strtok($talentData['loadout_code'], '?') . "\n";
         }
 
         return $simc;
@@ -502,11 +619,11 @@ function mplusColor($rating)
     <title>WoW Talent Viewer</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <script>
-    const whTooltips = {
-        colorLinks: true,
-        iconizeLinks: false, // set this to false
-        renameLinks: true
-    };
+        const whTooltips = {
+            colorLinks: true,
+            iconizeLinks: false, // set this to false
+            renameLinks: true
+        };
     </script>
     <script src="https://wow.zamimg.com/js/tooltips.js"></script>
     <style>
@@ -608,7 +725,7 @@ function mplusColor($rating)
     </style>
     <?php
     $ogTitle = "WoW Talent & Gear Viewer";
-    $ogDesc = "Instantly view WoW character talents, gear, M+ score, tier bonuses, and export to SimC.";
+    $ogDesc = "Instantly view WoW character talents, gear, M+ score, tier bonuses, and more. Powered by Blizzard's official API.";
     $ogImage = "https://albaweb.net/wow/images/thumbnail.png";
 
     if (!empty($_POST['character']) && !empty($_POST['realm'])) {
@@ -717,7 +834,8 @@ function mplusColor($rating)
                                     <div class="mt-2">
                                         <a href="https://www.wowhead.com/talent-calc/blizzard/<?php echo $data['loadout_code']; ?>"
                                             target="_blank" class="btn btn-sm btn-outline-warning">View on Wowhead</a>
-                                        <button class="btn btn-sm btn-outline-success" onclick="copySimC()">Copy SimC</button>
+                                        <!-- SimC export disabled - Raidbots keeps changing format 
+                                            <button class="btn btn-sm btn-outline-success" onclick="copySimC()">Copy SimC</button> -->
                                     </div>
                                     <textarea id="simcString" class="d-none"><?php echo htmlspecialchars($tester->generateSimcString($data, $gear, $data)); ?></textarea>
                                 <?php endif; ?>
