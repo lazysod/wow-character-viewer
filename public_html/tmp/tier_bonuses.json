@@ -1,5 +1,15 @@
 {
     "1971": {
         "2": "Set: Your harmful spells and abilities have a chance to unleash a Twilight Barrage at your target."
+    },
+    "1983": {
+        "2": "Set: Each Arcane Charge increases your critical strike chance by 1.0%.",
+        "4": "Set: The critical strike damage of your Arcane spells is increased by 10%."
+    },
+    "812": {
+        "2": "Set: Spring Tuxedo"
+    },
+    "1331": {
+        "2": "Set: Increases Avoidance."
     }
 }

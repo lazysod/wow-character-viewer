@@ -836,6 +836,8 @@ function mplusColor($rating)
                                             target="_blank" class="btn btn-sm btn-outline-warning">View on Wowhead</a>
                                         <!-- SimC export disabled - Raidbots keeps changing format 
                                             <button class="btn btn-sm btn-outline-success" onclick="copySimC()">Copy SimC</button> -->
+                                            <button class="btn btn-sm btn-outline-success" onclick="copyURL(this)">Share Profile</button>
+                                            <a href="<?php echo $config['display']['base_url']; ?>" class="btn btn-outline-info btn-sm" onclick="resetProfile()">Reset</a>
                                     </div>
                                     <textarea id="simcString" class="d-none"><?php echo htmlspecialchars($tester->generateSimcString($data, $gear, $data)); ?></textarea>
                                 <?php endif; ?>
@@ -1166,20 +1168,49 @@ function mplusColor($rating)
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+
+        // small onload check to see if query string is set
+        const canAutoSubmit = <?php echo json_encode($_SERVER['REQUEST_METHOD'] === 'GET'); ?>;
+        window.addEventListener('load', function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const character = urlParams.get('character');
+            const realm = urlParams.get('realm');
+            if (canAutoSubmit && character && realm) {
+                document.getElementById('loadingOverlay').classList.remove('d-none');
+                console.log('Found character and realm in query string. Submitting form...');
+                document.querySelector('input[name="character"]').value = character;
+                document.querySelector('input[name="realm"]').value = realm;
+                document.getElementById('charForm').submit();
+            } else {
+                console.log('No character or realm in query string.');
+            }
+        });
+
+
         document.getElementById('charForm').addEventListener('submit', function() {
             document.getElementById('loadingOverlay').classList.remove('d-none');
             this.querySelector('button[type="submit"]').disabled = true;
             this.querySelector('button[type="submit"]').innerHTML = '<span class="spinner-border spinner-border-sm"></span> Loading...';
         });
 
-        function copySimC() {
-            const simc = document.getElementById('simcString').value;
-            navigator.clipboard.writeText(simc).then(() => {
-                event.target.textContent = 'Copied!';
-                setTimeout(() => event.target.textContent = 'Copy SimC', 2000);
+        // function copySimC(button) {
+        //     const simc = document.getElementById('simcString').value;
+        //     navigator.clipboard.writeText(simc).then(() => {
+        //         button.textContent = 'Copied!';
+        //         setTimeout(() => button.textContent = 'Copy SimC', 2000);
+        //     });
+        // }
+        
+        function copyURL(button) {
+            const url = window.location.href;
+            const character = document.querySelector('input[name="character"]').value;
+            const realm = document.querySelector('input[name="realm"]').value;
+            const fullUrl = url.includes('?') ? url : url + '?character=' + encodeURIComponent(character) + '&realm=' + encodeURIComponent(realm);
+            navigator.clipboard.writeText(fullUrl).then(() => {
+                button.textContent = 'Copied!';
+                setTimeout(() => button.textContent = 'Share Profile', 2000);
             });
         }
-
         // Initialize Bootstrap tooltips for tier bonuses
         var tooltipTriggerList = [].slice.call(document.querySelectorAll('[title]'));
         var tooltipList = tooltipTriggerList.map(function(tooltipTriggerEl) {
